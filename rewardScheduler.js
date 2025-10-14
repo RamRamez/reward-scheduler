@@ -1,14 +1,16 @@
 import https from 'https'
-import { config_test } from './config'
+import { config_test } from './config.js'
 
 const { TARGET_URL, REQUEST_BODY, TARGET_TIMES, TOKENS, ORIGIN } = config_test
+const REQUEST_BODY_STRING = JSON.stringify(REQUEST_BODY)
 
 // --- Server clock calibration helpers ---
-async function fetchServerNow() {
+async function calibrateServerOffset() {
   const url = new URL(TARGET_URL)
-  // Prefer HEAD; some servers don't support it, so fallback to GET
-  const tryRequest = method =>
-    new Promise(resolve => {
+
+  async function measureOnce(method) {
+    return new Promise(resolve => {
+      const t0 = Date.now()
       const req = https.request(
         {
           protocol: url.protocol,
@@ -19,26 +21,38 @@ async function fetchServerNow() {
           timeout: 5000,
         },
         res => {
-          const serverDate = res.headers && res.headers.date
-          if (serverDate) {
-            const parsed = new Date(serverDate)
-            if (!Number.isNaN(parsed.getTime())) {
-              resolve(parsed)
-              return
-            }
+          const t1 = Date.now()
+          const serverDateHeader = res.headers && res.headers.date
+          if (!serverDateHeader) {
+            resolve(undefined)
+            return
           }
-          // If no date header or parse failed, resolve undefined
-          resolve(undefined)
+          const serverDate = new Date(serverDateHeader)
+          if (Number.isNaN(serverDate.getTime())) {
+            resolve(undefined)
+            return
+          }
+          const rttMs = t1 - t0
+          const midLocal = t0 + rttMs / 2
+          const offsetMs = serverDate.getTime() - midLocal
+          resolve({ serverDate, offsetMs, rttMs })
         },
       )
       req.on('error', () => resolve(undefined))
       req.end()
     })
+  }
 
-  const head = await tryRequest('HEAD')
-  if (head) return head
-  const get = await tryRequest('GET')
-  return get
+  const attempts = []
+  for (let i = 0; i < 3; i++) {
+    const head = await measureOnce('HEAD')
+    if (head) attempts.push(head)
+    const get = await measureOnce('GET')
+    if (get) attempts.push(get)
+  }
+  if (!attempts.length) return undefined
+  attempts.sort((a, b) => a.rttMs - b.rttMs)
+  return attempts[0]
 }
 
 function getTzOffsetMinutesFromEnv() {
@@ -121,7 +135,7 @@ function sendRewardRequest(token) {
       'sec-fetch-site': 'same-site',
       'sec-gpc': '1',
       'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X x.y; rv:42.0) Gecko/20100101 Firefox/42.0',
-      'content-length': Buffer.byteLength(REQUEST_BODY),
+      'content-length': Buffer.byteLength(REQUEST_BODY_STRING),
     }
 
     const options = {
@@ -155,22 +169,22 @@ function sendRewardRequest(token) {
       })
     })
 
-    req.write(REQUEST_BODY)
+    req.write(REQUEST_BODY_STRING)
     req.end()
   })
 }
 
 async function main() {
-  // 1) Calibrate against server time
-  const localNowAtStart = new Date()
-  const serverNow = await fetchServerNow()
+  // 1) Calibrate against server time with RTT-compensated offset
+  const calibration = await calibrateServerOffset()
   const tzOffsetMinutes = getTzOffsetMinutesFromEnv()
 
   let schedules = []
-  if (serverNow) {
-    const serverOffsetMs = serverNow.getTime() - localNowAtStart.getTime()
+  if (calibration) {
+    const { offsetMs } = calibration
+    const serverNow = new Date(Date.now() + offsetMs)
     console.log(
-      `Calibrated server time. serverNow=${serverNow.toISOString()} localNow=${localNowAtStart.toISOString()} offsetMs=${serverOffsetMs}`,
+      `Calibrated server time. serverNow=${serverNow.toISOString()} offsetMs=${offsetMs}`,
     )
 
     for (const timeStr of TARGET_TIMES) {
@@ -178,7 +192,7 @@ async function main() {
         timeStr,
         serverNow,
         tzOffsetMinutes,
-        serverOffsetMs,
+        offsetMs,
       )
       schedules.push({ timeStr, when })
     }
