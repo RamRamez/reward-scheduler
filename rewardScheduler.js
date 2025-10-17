@@ -1,7 +1,7 @@
 import https from 'https'
-import { config_test } from './config.js'
+import { config } from './config.js'
 
-const { TARGET_URL, REQUEST_BODY, TARGET_TIMES, TOKENS, ORIGIN } = config_test
+const { TARGET_URL, REQUEST_BODY, TARGET_TIMES, TOKENS, ORIGIN } = config
 const REQUEST_BODY_STRING = JSON.stringify(REQUEST_BODY)
 
 // --- Server clock calibration helpers ---
